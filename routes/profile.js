@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
+const { getDb } = require('../mongodb');
 const authMiddleware = require('../middleware/auth');
 const { generatePlan } = require('../agents/planner');
-const db = require('../db');
 
 function buildProfilePayload(data) {
   return {
@@ -17,22 +17,23 @@ function buildProfilePayload(data) {
   };
 }
 
-
 // GET PROFILE
 router.get('/', authMiddleware, async (req, res) => {
   try {
     const userId = req.user.id;
+    const database = await getDb();
+    const col = database.collection('profile');
 
-    const profileRes = await db.query(
-      'SELECT * FROM profile WHERE user_id = $1 LIMIT 1',
-      [userId]
-    );
+    const profile = await col.findOne({ user_id: userId });
 
-    if (!profileRes.rows || profileRes.rows.length === 0) {
+    if (!profile) {
       return res.status(404).json({ message: 'Profile not found. Onboarding required.' });
     }
 
-    return res.json(profileRes.rows[0]);
+    return res.json({
+      id: profile._id?.toString?.() ?? profile._id,
+      ...profile
+    });
   } catch (error) {
     console.error('Fetch profile error:', error);
     res.status(500).json({ error: 'Internal server error fetching profile.' });
@@ -49,32 +50,30 @@ router.put('/', authMiddleware, async (req, res) => {
 
   try {
     const payload = buildProfilePayload({ age, height_cm, weight_kg, activity_level, dietary_preference, medical_conditions });
-
-    // Upsert profile into MongoDB.
-    // Collection name: profile
-    // Schema assumed: { user_id, ...profileFields }
     const userId = req.user.id;
+    const database = await getDb();
+    const col = database.collection('profile');
 
-    // Try update first
-    const updateRes = await db.query(
-      'UPDATE profile SET age = $1 WHERE user_id = $2',
-      [payload.age, userId]
-    ).catch(() => ({ rows: [] }));
-
-    // If adapter can't handle complex updates, fall back to insert-only behavior.
-    // (Bloom db adapter supports only a small subset; this route uses it defensively.)
-    await db.query(
-      'INSERT INTO profile (user_id, age, height_cm, weight_kg, activity_level, dietary_preference, medical_conditions) VALUES ($1,$2,$3,$4,$5,$6,$7)',
-      [userId, payload.age, payload.height_cm, payload.weight_kg, payload.activity_level, payload.dietary_preference, JSON.stringify(payload.medical_conditions)]
-    ).catch(async () => {
-      // If insert isn't supported due to adapter limitations, at least return payload.
-    });
-
+    await col.updateOne(
+      { user_id: userId },
+      {
+        $set: {
+          user_id: userId,
+          age: payload.age,
+          height_cm: payload.height_cm,
+          weight_kg: payload.weight_kg,
+          activity_level: payload.activity_level,
+          dietary_preference: payload.dietary_preference,
+          medical_conditions: payload.medical_conditions
+        }
+      },
+      { upsert: true }
+    );
 
     let initialPlan = null;
     if (trigger_plan) {
       try {
-        initialPlan = await generatePlan(req.user.id);
+        initialPlan = await generatePlan(userId);
       } catch (agentErr) {
         console.error('Failed to generate initial plan during onboarding:', agentErr);
       }
@@ -92,4 +91,3 @@ router.put('/', authMiddleware, async (req, res) => {
 });
 
 module.exports = router;
-

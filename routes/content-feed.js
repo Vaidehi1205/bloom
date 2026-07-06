@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../db');
+const { getDb } = require('../mongodb');
 const authMiddleware = require('../middleware/auth');
 
 // GET PHASE-AWARE ARTICLE
@@ -14,24 +14,29 @@ router.get('/', authMiddleware, async (req, res) => {
   const queryLocale = locale || req.user.locale || 'en';
 
   try {
-    const articleRes = await db.query(
-      'SELECT * FROM content_feed WHERE phase_tag = $1 AND locale = $2 LIMIT 1',
-      [phase.toLowerCase(), queryLocale]
-    );
+    const database = await getDb();
+    const col = database.collection('content_feed');
 
-    if (articleRes.rows.length === 0) {
+    let article = await col.findOne({
+      phase_tag: phase.toLowerCase(),
+      locale: queryLocale
+    });
+
+    if (!article) {
       // Fallback: try finding English article for the phase
-      const fallbackRes = await db.query(
-        'SELECT * FROM content_feed WHERE phase_tag = $1 AND locale = $2 LIMIT 1',
-        [phase.toLowerCase(), 'en']
-      );
-      if (fallbackRes.rows.length === 0) {
+      article = await col.findOne({
+        phase_tag: phase.toLowerCase(),
+        locale: 'en'
+      });
+      if (!article) {
         return res.status(404).json({ error: 'No article found for this cycle phase.' });
       }
-      return res.json(fallbackRes.rows[0]);
     }
 
-    res.json(articleRes.rows[0]);
+    res.json({
+      id: article._id?.toString?.() ?? article._id,
+      ...article
+    });
   } catch (error) {
     console.error('Fetch content feed article error:', error);
     res.status(500).json({ error: 'Internal server error fetching phase article.' });

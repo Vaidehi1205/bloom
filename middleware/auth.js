@@ -8,7 +8,12 @@ async function authMiddleware(req, res, next) {
     return res.status(401).json({ error: 'Access denied. No token provided.' });
   }
 
-  const token = authHeader.split(' ')[1];
+  // Accept either: "Bearer <token>" or just "<token>" (some clients may omit the scheme)
+  const parts = authHeader.split(' ').map(s => s.trim()).filter(Boolean);
+  const token = parts.length === 1 ? parts[0] : parts[1];
+  if (typeof token === 'string' && !token.trim()) {
+    return res.status(401).json({ error: 'Access denied. No token provided.' });
+  }
   if (!token) {
     return res.status(401).json({ error: 'Access denied. Invalid token format.' });
   }

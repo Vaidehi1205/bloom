@@ -36,32 +36,51 @@ router.post('/', authMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'Period start, end, and flow intensity are required.' });
   }
 
+  // Keep the main request stable: cycle log save must succeed (predictor/triage are best-effort).
   try {
-    // Insert the log
     const database = await getDb();
     const col = database.collection('cycle_logs');
 
-    await col.insertOne({
-      user_id: userId,
-      period_start,
-      period_end,
-      flow_intensity,
-      notes: notes || ''
-    });
+    // 1) Insert the log
+    try {
+      await col.insertOne({
+        user_id: userId,
+        period_start,
+        period_end,
+        flow_intensity,
+        notes: notes || ''
+      });
+    } catch (insertErr) {
+      console.error('Save cycle log error (insertOne):', {
+        error: insertErr?.message || String(insertErr),
+        stack: insertErr?.stack,
+        userId,
+        body: { period_start, period_end, flow_intensity, notes }
+      });
+      return res.status(500).json({ error: 'Internal server error saving cycle log.' });
+    }
 
-    // Proactively run predictor to update the phase for the dashboard immediately
+    // 2) Proactively run predictor to update the phase for the dashboard immediately (best-effort)
     let predictionResult = null;
     try {
       predictionResult = await predictCycle(userId);
     } catch (predErr) {
-      console.error('Predictor failed after logging cycle:', predErr);
+      console.error('Predictor failed after logging cycle:', {
+        error: predErr?.message || String(predErr),
+        stack: predErr?.stack,
+        userId
+      });
     }
 
-    // Proactively run triage checks
+    // 3) Proactively run triage checks (best-effort)
     try {
       await runTriage(userId);
     } catch (triageErr) {
-      console.error('Triage check failed after logging cycle:', triageErr);
+      console.error('Triage check failed after logging cycle:', {
+        error: triageErr?.message || String(triageErr),
+        stack: triageErr?.stack,
+        userId
+      });
     }
 
     res.status(201).json({
@@ -69,7 +88,12 @@ router.post('/', authMiddleware, async (req, res) => {
       prediction: predictionResult
     });
   } catch (error) {
-    console.error('Save cycle log error:', error);
+    console.error('Save cycle log error (pre-insert / getDb):', {
+      error: error?.message || String(error),
+      stack: error?.stack,
+      userId,
+      body: { period_start, period_end, flow_intensity, notes }
+    });
     res.status(500).json({ error: 'Internal server error saving cycle log.' });
   }
 });

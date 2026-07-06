@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../db');
+const { getDb } = require('../mongodb');
 const authMiddleware = require('../middleware/auth');
 const { generatePlan } = require('../agents/planner');
 
@@ -9,12 +9,16 @@ router.get('/current', authMiddleware, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const plansRes = await db.query(
-      'SELECT * FROM plans WHERE user_id = $1 ORDER BY id DESC LIMIT 1',
-      [userId]
-    );
+    const database = await getDb();
+    const plansCol = database.collection('plans');
 
-    if (plansRes.rows.length === 0) {
+    const latestPlan = await plansCol
+      .find({ user_id: userId })
+      .sort({ id: -1 })
+      .limit(1)
+      .toArray();
+
+    if (latestPlan.length === 0) {
       // Auto-generate if missing (defensive fallback)
       console.log(`No plan found for user ${userId}. Auto-generating...`);
       try {
@@ -25,7 +29,7 @@ router.get('/current', authMiddleware, async (req, res) => {
       }
     }
 
-    const plan = plansRes.rows[0];
+    const plan = latestPlan[0];
     let parsedContent;
     try {
       parsedContent = typeof plan.content === 'string' ? JSON.parse(plan.content) : plan.content;
@@ -34,7 +38,7 @@ router.get('/current', authMiddleware, async (req, res) => {
     }
 
     res.json({
-      id: plan.id,
+      id: plan._id?.toString?.() ?? plan._id,
       week_number: plan.week_number,
       type: plan.type,
       content: parsedContent,

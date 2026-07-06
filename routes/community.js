@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../db');
+const { getDb } = require('../mongodb');
 const authMiddleware = require('../middleware/auth');
 const { moderatePost } = require('../agents/moderation');
 
@@ -9,29 +9,44 @@ router.get('/posts', authMiddleware, async (req, res) => {
   const locale = req.query.locale || 'en';
 
   try {
+    const database = await getDb();
+    const postsCol = database.collection('community_posts');
+    const usersCol = database.collection('users');
+
     // Fetch posts
-    const postsRes = await db.query(
-      `SELECT p.*, u.email as user_email 
-       FROM community_posts p 
-       LEFT JOIN users u ON p.user_id = u.id 
-       WHERE p.locale = $1
-       ORDER BY p.created_at DESC`,
-      [locale]
-    );
+    const posts = await postsCol
+      .find({ locale })
+      .sort({ created_at: -1 })
+      .toArray();
 
-    const posts = postsRes.rows;
-
-    // Fetch replies for each post
+    // Fetch user emails for each post
     for (const post of posts) {
-      const repliesRes = await db.query(
-        `SELECT r.*, u.email as user_email 
-         FROM community_replies r 
-         LEFT JOIN users u ON r.user_id = u.id 
-         WHERE r.post_id = $1 
-         ORDER BY r.created_at ASC`,
-        [post.id]
-      );
-      post.replies = repliesRes.rows;
+      if (post.user_id) {
+        const user = await usersCol.findOne(
+          { id: post.user_id },
+          { projection: { email: 1 } }
+        );
+        post.user_email = user?.email || null;
+      }
+
+      // Fetch replies for each post
+      const repliesCol = database.collection('community_replies');
+      const replies = await repliesCol
+        .find({ post_id: post._id?.toString?.() ?? post.id })
+        .sort({ created_at: 1 })
+        .toArray();
+
+      // Fetch user emails for replies
+      for (const reply of replies) {
+        if (reply.user_id) {
+          const replyUser = await usersCol.findOne(
+            { id: reply.user_id },
+            { projection: { email: 1 } }
+          );
+          reply.user_email = replyUser?.email || null;
+        }
+      }
+      post.replies = replies;
     }
 
     res.json(posts);
@@ -52,24 +67,25 @@ router.post('/posts', authMiddleware, async (req, res) => {
 
   try {
     const postUserId = anonymous ? null : userId;
-    
-    // Insert post as 'pending'
-    const insertRes = await db.query(
-      'INSERT INTO community_posts (user_id, body, locale, moderation_status) VALUES ($1, $2, $3, $4) RETURNING id, user_id, body, locale, moderation_status, created_at',
-      [postUserId, body, locale, 'pending']
-    ).catch(async () => {
-      // Fallback SQLite
-      await db.query(
-        'INSERT INTO community_posts (user_id, body, locale, moderation_status) VALUES ($1, $2, $3, $4)',
-        [postUserId, body, locale, 'pending']
-      );
-      return db.query(
-        'SELECT * FROM community_posts WHERE user_id = $1 AND body = $2 ORDER BY id DESC LIMIT 1',
-        [postUserId, body]
-      );
+    const database = await getDb();
+    const postsCol = database.collection('community_posts');
+
+    const result = await postsCol.insertOne({
+      user_id: postUserId,
+      body,
+      locale,
+      moderation_status: 'pending',
+      created_at: new Date()
     });
 
-    const newPost = insertRes.rows[0];
+    const newPost = {
+      id: result.insertedId.toString(),
+      user_id: postUserId,
+      body,
+      locale,
+      moderation_status: 'pending',
+      created_at: new Date()
+    };
 
     // Trigger Content Moderation Agent in the background (asynchronous)
     moderatePost(newPost.id, body, userId).then((status) => {
@@ -99,29 +115,31 @@ router.post('/posts/:id/replies', authMiddleware, async (req, res) => {
   }
 
   try {
+    const database = await getDb();
+    const postsCol = database.collection('community_posts');
+    const repliesCol = database.collection('community_replies');
+
     // Ensure the post exists
-    const checkPost = await db.query('SELECT id FROM community_posts WHERE id = $1', [postId]);
-    if (checkPost.rows.length === 0) {
+    const post = await postsCol.findOne({ _id: postId });
+    if (!post) {
       return res.status(404).json({ error: 'Post not found.' });
     }
 
     // Insert reply
-    const insertRes = await db.query(
-      'INSERT INTO community_replies (post_id, user_id, body) VALUES ($1, $2, $3) RETURNING *',
-      [postId, userId, body]
-    ).catch(async () => {
-      // Fallback SQLite
-      await db.query(
-        'INSERT INTO community_replies (post_id, user_id, body) VALUES ($1, $2, $3)',
-        [postId, userId, body]
-      );
-      return db.query(
-        'SELECT * FROM community_replies WHERE post_id = $1 AND user_id = $2 ORDER BY id DESC LIMIT 1',
-        [postId, userId]
-      );
+    const result = await repliesCol.insertOne({
+      post_id: postId,
+      user_id: userId,
+      body,
+      created_at: new Date()
     });
 
-    const reply = insertRes.rows[0];
+    const reply = {
+      id: result.insertedId.toString(),
+      post_id: postId,
+      user_id: userId,
+      body,
+      created_at: new Date()
+    };
     reply.user_email = req.user.email; // attach email for UI mapping
 
     res.status(201).json({

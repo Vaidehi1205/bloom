@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const { initScheduler } = require('./scheduler');
-const db = require('./db');
+const { getDb } = require('./mongodb');
 
 // Load environment variables
 dotenv.config();
@@ -31,7 +31,6 @@ require('./mongodb')
   });
 
 
-
 // Mount Routes
 
 app.use('/api/auth', require('./routes/auth'));
@@ -50,11 +49,21 @@ app.use('/api/settings', require('./routes/settings'));
 const authMiddleware = require('./middleware/auth');
 app.get('/api/notifications', authMiddleware, async (req, res) => {
   try {
-    const notifRes = await db.query(
-      'SELECT * FROM notifications WHERE user_id = $1 ORDER BY scheduled_for DESC LIMIT 15',
-      [req.user.id]
+    const database = await getDb();
+    const col = database.collection('notifications');
+
+    const notifs = await col
+      .find({ user_id: req.user.id })
+      .sort({ scheduled_for: -1 })
+      .limit(15)
+      .toArray();
+
+    res.json(
+      notifs.map((d) => ({
+        id: d._id?.toString?.() ?? d._id,
+        ...d
+      }))
     );
-    res.json(notifRes.rows);
   } catch (error) {
     console.error('Fetch notifications error:', error);
     res.status(500).json({ error: 'Failed to fetch user notifications.' });
@@ -64,10 +73,13 @@ app.get('/api/notifications', authMiddleware, async (req, res) => {
 // Dismiss notifications
 app.delete('/api/notifications/:id', authMiddleware, async (req, res) => {
   try {
-    await db.query(
-      'DELETE FROM notifications WHERE id = $1 AND user_id = $2',
-      [req.params.id, req.user.id]
-    );
+    const database = await getDb();
+    const col = database.collection('notifications');
+
+    await col.deleteOne({
+      _id: req.params.id,
+      user_id: req.user.id
+    });
     res.json({ message: 'Notification dismissed.' });
   } catch (error) {
     console.error('Delete notification error:', error);
@@ -78,11 +90,21 @@ app.delete('/api/notifications/:id', authMiddleware, async (req, res) => {
 // Audit Actions Route (for profile settings or dev logs display)
 app.get('/api/agent-actions', authMiddleware, async (req, res) => {
   try {
-    const actionsRes = await db.query(
-      'SELECT * FROM agent_actions WHERE user_id = $1 ORDER BY created_at DESC LIMIT 30',
-      [req.user.id]
+    const database = await getDb();
+    const col = database.collection('agent_actions');
+
+    const actions = await col
+      .find({ user_id: req.user.id })
+      .sort({ created_at: -1 })
+      .limit(30)
+      .toArray();
+
+    res.json(
+      actions.map((d) => ({
+        id: d._id?.toString?.() ?? d._id,
+        ...d
+      }))
     );
-    res.json(actionsRes.rows);
   } catch (error) {
     console.error('Fetch agent actions error:', error);
     res.status(500).json({ error: 'Failed to fetch audit actions.' });
@@ -128,7 +150,7 @@ app.get('/api/db/health', async (req, res) => {
       dbName,
       envPresent,
       note: connected
-        ? 'Mongo is connected. API routes using db.query() should work.'
+        ? 'Mongo is connected. API routes using MongoDB should work.'
         : 'Mongo is not connected. Check server logs for the exact Mongo error.',
     });
   } catch (e) {

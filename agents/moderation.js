@@ -1,11 +1,11 @@
-const db = require('../db');
+const { getDb } = require('../mongodb');
 const { callClaude } = require('./claude');
 
 /**
  * Screens a community post for safety guidelines.
- * @param {number} postId
+ * @param {string} postId
  * @param {string} postBody
- * @param {number|null} userId
+ * @param {string|null} userId
  */
 async function moderatePost(postId, postBody, userId) {
   try {
@@ -29,25 +29,35 @@ Do not write anything else. No chat, no markdown.`;
     const moderationStatus = isApproved ? 'approved' : 'flagged';
 
     // Update community post in database
-    await db.query(
-      'UPDATE community_posts SET moderation_status = $1 WHERE id = $2',
-      [moderationStatus, postId]
+    const database = await getDb();
+    const postsCol = database.collection('community_posts');
+    const agentActionsCol = database.collection('agent_actions');
+
+    await postsCol.updateOne(
+      { _id: postId },
+      { $set: { moderation_status: moderationStatus } }
     );
 
     // Audit log
     const summary = `Post ID ${postId} evaluated as "${moderationStatus}". Reason: ${isApproved ? 'Passed compliance check' : 'Triggered safety guidelines'}`;
-    await db.query(
-      'INSERT INTO agent_actions (user_id, agent_name, trigger_type, action_taken, reasoning_summary) VALUES ($1, $2, $3, $4, $5)',
-      [userId, 'Moderation Agent', 'new_community_post', `Set status to ${moderationStatus}`, summary]
-    );
+    await agentActionsCol.insertOne({
+      user_id: userId,
+      agent_name: 'Moderation Agent',
+      trigger_type: 'new_community_post',
+      action_taken: `Set status to ${moderationStatus}`,
+      reasoning_summary: summary,
+      created_at: new Date()
+    });
 
     return moderationStatus;
   } catch (error) {
     console.error('Moderation Agent error:', error);
     // Safe default fallback in case of errors: approve but log the error
-    await db.query(
-      "UPDATE community_posts SET moderation_status = 'approved' WHERE id = $1",
-      [postId]
+    const database = await getDb();
+    const postsCol = database.collection('community_posts');
+    await postsCol.updateOne(
+      { _id: postId },
+      { $set: { moderation_status: 'approved' } }
     );
     return 'approved';
   }

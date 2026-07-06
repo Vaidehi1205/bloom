@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../db');
+const { getDb } = require('../mongodb');
 const authMiddleware = require('../middleware/auth');
 
 // GET TRENDS AND CORRELATIONS (30/90 DAYS)
@@ -9,33 +9,20 @@ router.get('/', authMiddleware, async (req, res) => {
   const days = parseInt(req.query.days) || 30;
 
   try {
-    // Determine database engine compatibility for date intervals
-    let logsQuery;
-    let queryParams = [userId, days];
+    const database = await getDb();
+    const col = database.collection('daily_logs');
 
-    if (db.dbType === 'postgres') {
-      logsQuery = `
-        SELECT * FROM daily_logs 
-        WHERE user_id = $1 AND date >= CURRENT_DATE - ($2 || ' days')::INTERVAL
-        ORDER BY date ASC
-      `;
-    } else {
-      logsQuery = `
-        SELECT * FROM daily_logs 
-        WHERE user_id = $1 AND datetime(date) >= datetime('now', '-' || $2 || ' days')
-        ORDER BY date ASC
-      `;
-    }
+    // Calculate date threshold
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - days);
 
-    const logsRes = await db.query(logsQuery, queryParams).catch(async () => {
-      // General fallback if complex interval parsing fails: just get recent logs
-      return db.query(
-        'SELECT * FROM daily_logs WHERE user_id = $1 ORDER BY date ASC LIMIT $2',
-        [userId, days]
-      );
-    });
-
-    const logs = logsRes.rows;
+    const logs = await col
+      .find({
+        user_id: userId,
+        date: { $gte: cutoffDate.toISOString().split('T')[0] }
+      })
+      .sort({ date: 1 })
+      .toArray();
 
     // Numerical scale for moods to draw lines/bars in Recharts
     const moodScales = {
@@ -71,7 +58,7 @@ router.get('/', authMiddleware, async (req, res) => {
       sleepTrend.push({ date: formattedDate, sleep: sleepHrs });
 
       // 2. Mood Trend
-      const moodVal = moodScales[log.mood.toLowerCase()] || 3;
+      const moodVal = moodScales[log.mood?.toLowerCase()] || 3;
       moodTrend.push({ date: formattedDate, mood: moodVal, moodLabel: log.mood });
 
       // 3. Exercise Adherence

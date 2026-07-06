@@ -1,4 +1,4 @@
-const db = require('../db');
+const { getDb } = require('../mongodb');
 const { callClaude } = require('./claude');
 
 /**
@@ -9,25 +9,35 @@ const { callClaude } = require('./claude');
 async function generatePlan(userId, adjustmentReason = '') {
   try {
     // 1. Retrieve user data
-    const userRes = await db.query('SELECT * FROM users WHERE id = $1', [userId]);
-    if (userRes.rows.length === 0) throw new Error('User not found');
-    const user = userRes.rows[0];
+    const database = await getDb();
+    const usersCol = database.collection('users');
+    const profileCol = database.collection('profile');
+    const logsCol = database.collection('daily_logs');
+    const predictionsCol = database.collection('predictions');
+    const plansCol = database.collection('plans');
+    const agentActionsCol = database.collection('agent_actions');
 
-    const profileRes = await db.query('SELECT * FROM profile WHERE user_id = $1', [userId]);
-    const profile = profileRes.rows[0] || {};
+    const user = await usersCol.findOne({ id: userId });
+    if (!user) throw new Error('User not found');
 
-    const logsRes = await db.query('SELECT * FROM daily_logs WHERE user_id = $1 ORDER BY date DESC LIMIT 7', [userId]);
-    const logs = logsRes.rows;
+    const profile = await profileCol.findOne({ user_id: userId });
+    const prediction = await predictionsCol.findOne(
+      { user_id: userId },
+      { sort: { created_at: -1 } }
+    );
 
-    const predictionRes = await db.query('SELECT * FROM predictions WHERE user_id = $1 ORDER BY id DESC LIMIT 1', [userId]);
-    const prediction = predictionRes.rows[0] || { predicted_phase: 'follicular', predicted_next_period: 'Not calculated' };
+    const logs = await logsCol
+      .find({ user_id: userId })
+      .sort({ date: -1 })
+      .limit(7)
+      .toArray();
 
     // Parse profile conditions and logs
     let medicalConditions = [];
     try {
-      medicalConditions = typeof profile.medical_conditions === 'string' 
-        ? JSON.parse(profile.medical_conditions) 
-        : (profile.medical_conditions || []);
+      medicalConditions = typeof profile?.medical_conditions === 'string'
+        ? JSON.parse(profile.medical_conditions)
+        : (profile?.medical_conditions || []);
     } catch (e) {
       medicalConditions = [];
     }
@@ -59,14 +69,14 @@ The JSON schema MUST match:
 
     const userPrompt = `
 User Profile:
-- Age: ${profile.age || 'Unknown'}
-- Height: ${profile.height_cm || 'Unknown'} cm
-- Weight: ${profile.weight_kg || 'Unknown'} kg
-- Activity Level: ${profile.activity_level || 'Moderate'}
-- Dietary Preference: ${profile.dietary_preference || 'None'}
+- Age: ${profile?.age || 'Unknown'}
+- Height: ${profile?.height_cm || 'Unknown'} cm
+- Weight: ${profile?.weight_kg || 'Unknown'} kg
+- Activity Level: ${profile?.activity_level || 'Moderate'}
+- Dietary Preference: ${profile?.dietary_preference || 'None'}
 - Medical Conditions: ${JSON.stringify(medicalConditions)}
-- Current Cycle Phase: ${prediction.predicted_phase}
-- Predicted Next Period: ${prediction.predicted_next_period}
+- Current Cycle Phase: ${prediction?.predicted_phase || 'follicular'}
+- Predicted Next Period: ${prediction?.predicted_next_period || 'Not calculated'}
 
 Recent Logs (last 7 entries):
 ${JSON.stringify(logs.map(l => ({ date: l.date, water: l.water_intake_ml, sleep: l.sleep_hours, mood: l.mood, symptoms: l.symptoms })))}
@@ -74,7 +84,7 @@ ${JSON.stringify(logs.map(l => ({ date: l.date, water: l.water_intake_ml, sleep:
 Adjustment Context/Request:
 ${adjustmentReason ? `"${adjustmentReason}"` : 'Routine weekly check/onboarding.'}
 
-Please tailor the diet and exercise to support their current cycle phase (${prediction.predicted_phase}).
+Please tailor the diet and exercise to support their current cycle phase (${prediction?.predicted_phase || 'follicular'}).
 If the user reports feeling tired, exhausted, or in pain, reduce the intensity of workouts and recommend highly restorative meals and hydration.
 Return only the raw JSON.`;
 
@@ -108,20 +118,28 @@ Return only the raw JSON.`;
     const contentString = JSON.stringify(parsedPlan);
 
     // Delete existing current week plans of same types
-    await db.query('DELETE FROM plans WHERE user_id = $1 AND week_number = $2', [userId, currentWeekNumber]);
+    await plansCol.deleteMany({ user_id: userId, week_number: currentWeekNumber });
 
     // Insert new plan
-    await db.query(
-      'INSERT INTO plans (user_id, week_number, type, content, generated_by_agent) VALUES ($1, $2, $3, $4, $5)',
-      [userId, currentWeekNumber, 'unified', contentString, 1]
-    );
+    await plansCol.insertOne({
+      user_id: userId,
+      week_number: currentWeekNumber,
+      type: 'unified',
+      content: contentString,
+      generated_by_agent: 1,
+      created_at: new Date()
+    });
 
     // 5. Log agent action
-    const actionSummary = `Generated unified weekly plan (diet/exercise) customized for ${prediction.predicted_phase} phase.${adjustmentReason ? ` Reason: ${adjustmentReason}` : ''}`;
-    await db.query(
-      'INSERT INTO agent_actions (user_id, agent_name, trigger_type, action_taken, reasoning_summary) VALUES ($1, $2, $3, $4, $5)',
-      [userId, 'Planner Agent', adjustmentReason ? 'user_request' : 'onboarding_or_schedule', actionSummary, JSON.stringify(parsedPlan)]
-    );
+    const actionSummary = `Generated unified weekly plan (diet/exercise) customized for ${prediction?.predicted_phase || 'follicular'} phase.${adjustmentReason ? ` Reason: ${adjustmentReason}` : ''}`;
+    await agentActionsCol.insertOne({
+      user_id: userId,
+      agent_name: 'Planner Agent',
+      trigger_type: adjustmentReason ? 'user_request' : 'onboarding_or_schedule',
+      action_taken: actionSummary,
+      reasoning_summary: JSON.stringify(parsedPlan),
+      created_at: new Date()
+    });
 
     return parsedPlan;
   } catch (error) {

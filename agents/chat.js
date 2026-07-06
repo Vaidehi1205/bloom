@@ -1,4 +1,4 @@
-const db = require('../db');
+const { getDb } = require('../mongodb');
 const { callClaude } = require('./claude');
 const { generatePlan } = require('./planner');
 
@@ -10,10 +10,16 @@ const { generatePlan } = require('./planner');
 async function handleChat(userId, messageHistory) {
   try {
     // 1. Fetch current profile & predictions for context
-    const profileRes = await db.query('SELECT * FROM profile WHERE user_id = $1', [userId]);
-    const profile = profileRes.rows[0] || {};
-    const predictionRes = await db.query('SELECT * FROM predictions WHERE user_id = $1 ORDER BY id DESC LIMIT 1', [userId]);
-    const prediction = predictionRes.rows[0] || { predicted_phase: 'follicular' };
+    const database = await getDb();
+    const profileCol = database.collection('profile');
+    const predictionsCol = database.collection('predictions');
+    const agentActionsCol = database.collection('agent_actions');
+
+    const profile = await profileCol.findOne({ user_id: userId });
+    const prediction = await predictionsCol.findOne(
+      { user_id: userId },
+      { sort: { created_at: -1 } }
+    );
 
     const systemPrompt = `You are the Bloom Health Assistant, a friendly, warm, empathetic, and supportive digital companion for menstrual health and wellness. 
 You answer general questions about periods, symptoms, sleep, hydration, nutrition, and exercise.
@@ -24,9 +30,9 @@ GUIDELINES:
 3. If the user expresses fatigue, soreness, pain, or explicitly asks to change/adjust their current exercise or diet plan, you MUST invoke the tool 'regenerate_plan' to update their plan. Do not just promise it; invoke the tool.
 
 User Context:
-- Current Cycle Phase: ${prediction.predicted_phase}
-- Dietary Preference: ${profile.dietary_preference || 'None'}
-- Medical Conditions: ${profile.medical_conditions || 'None'}`;
+- Current Cycle Phase: ${prediction?.predicted_phase || 'follicular'}
+- Dietary Preference: ${profile?.dietary_preference || 'None'}
+- Medical Conditions: ${profile?.medical_conditions || 'None'}`;
 
     const tools = [
       {
@@ -75,10 +81,14 @@ User Context:
       assistantMessage += `\n[System Update: I've updated your weekly plan based on your current state ("${adjustment_reason}"). You can see your new workout and nutrition guidelines on the Plan tab!]`;
 
       // Log the agent action
-      await db.query(
-        'INSERT INTO agent_actions (user_id, agent_name, trigger_type, action_taken, reasoning_summary) VALUES ($1, $2, $3, $4, $5)',
-        [userId, 'Chat Agent', 'tool_call', 'Triggered plan adjustment', `Executed regenerate_plan tool with reason: ${adjustment_reason}`]
-      );
+      await agentActionsCol.insertOne({
+        user_id: userId,
+        agent_name: 'Chat Agent',
+        trigger_type: 'tool_call',
+        action_taken: 'Triggered plan adjustment',
+        reasoning_summary: `Executed regenerate_plan tool with reason: ${adjustment_reason}`,
+        created_at: new Date()
+      });
     }
 
     return {

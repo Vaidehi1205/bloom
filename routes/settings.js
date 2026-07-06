@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../db');
+const { getDb } = require('../mongodb');
 const authMiddleware = require('../middleware/auth');
 
 // GET CURRENT LOCALE
@@ -8,11 +8,18 @@ router.get('/locale', authMiddleware, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const userRes = await db.query('SELECT locale FROM users WHERE id = $1', [userId]);
-    if (userRes.rows.length === 0) {
+    const database = await getDb();
+    const col = database.collection('users');
+
+    const user = await col.findOne(
+      { id: userId },
+      { projection: { locale: 1 } }
+    );
+
+    if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
-    res.json({ locale: userRes.rows[0].locale });
+    res.json({ locale: user.locale || 'en' });
   } catch (error) {
     console.error('Fetch settings locale error:', error);
     res.status(500).json({ error: 'Internal server error fetching locale.' });
@@ -29,7 +36,15 @@ router.put('/locale', authMiddleware, async (req, res) => {
   }
 
   try {
-    await db.query('UPDATE users SET locale = $1 WHERE id = $2', [locale, userId]);
+    const database = await getDb();
+    const col = database.collection('users');
+
+    await col.updateOne(
+      { id: userId },
+      { $set: { locale } },
+      { upsert: true }
+    );
+
     res.json({ message: 'Language settings updated successfully.', locale });
   } catch (error) {
     console.error('Update settings locale error:', error);
