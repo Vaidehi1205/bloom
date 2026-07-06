@@ -20,12 +20,20 @@ app.use(express.json());
 
 // Initialize background jobs and MongoDB after startup
 initScheduler();
-require('./mongodb').initMongo().catch((e) => {
-  console.error('MongoDB init failed:', e);
-});
+require('./mongodb')
+  .initMongo()
+  .then((res) => {
+    if (res) console.log('[Mongo] Mongo is available; requests will use MongoDB.');
+    else console.warn('[Mongo] Mongo is NOT available; requests depending on MongoDB may fail.');
+  })
+  .catch((e) => {
+    console.error('[Mongo] MongoDB init threw:', e);
+  });
+
 
 
 // Mount Routes
+
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/profile', require('./routes/profile'));
 app.use('/api/cycle-logs', require('./routes/cycle-logs'));
@@ -85,6 +93,53 @@ app.get('/api/agent-actions', authMiddleware, async (req, res) => {
 app.get('/', (req, res) => {
   res.json({ message: 'Bloom API Server is online.' });
 });
+
+// Mongo health/debug endpoint
+app.get('/api/db/health', async (req, res) => {
+  // Do not expose secrets; only show connection status + env presence
+  const envPresent = {
+    MONGODB_URI: Boolean(process.env.MONGODB_URI),
+    MONGO_URI: Boolean(process.env.MONGO_URI),
+    MONGODB_DB_NAME: Boolean(process.env.MONGODB_DB_NAME),
+    MONGODB_TLS: process.env.MONGODB_TLS || null,
+    MONGODB_TLS_ALLOW_UNAUTHORIZED: process.env.MONGODB_TLS_ALLOW_UNAUTHORIZED || null,
+    MONGODB_CONNECT_RETRIES: process.env.MONGODB_CONNECT_RETRIES || null,
+  };
+
+  try {
+    // Ensure we attempt a connection once if not already connected
+    const mongo = require('./mongodb');
+    const dbInstance = await mongo.initMongo();
+
+    let connected = false;
+    let dbName = null;
+    try {
+      // If initMongo returned null, getDb() will throw
+      if (dbInstance) connected = true;
+
+      // Best-effort dbName: read from env with same default as mongodb.js
+      dbName = process.env.MONGODB_DB_NAME || 'bloom';
+    } catch {
+      connected = false;
+    }
+
+    return res.json({
+      connected,
+      dbName,
+      envPresent,
+      note: connected
+        ? 'Mongo is connected. API routes using db.query() should work.'
+        : 'Mongo is not connected. Check server logs for the exact Mongo error.',
+    });
+  } catch (e) {
+    return res.status(500).json({
+      connected: false,
+      envPresent,
+      error: e?.message || String(e),
+    });
+  }
+});
+
 
 function startServer(port = DEFAULT_PORT, attempt = 1) {
   const server = app.listen(port, () => {

@@ -1,4 +1,4 @@
-const db = require('../db');
+const { getDb } = require('../mongodb');
 
 /**
  * Runs triage logic on a user's recent logs to scan for wellness anomalies.
@@ -9,12 +9,14 @@ async function runTriage(userId) {
     let anomalyDetected = false;
     const reasons = [];
 
+    const database = await getDb();
+
     // 1. Check Cycle Logs anomalies (cycle length deviation)
-    const logsRes = await db.query(
-      'SELECT * FROM cycle_logs WHERE user_id = $1 ORDER BY period_start DESC LIMIT 4',
-      [userId]
-    );
-    const logs = logsRes.rows;
+    const logs = await database.collection('cycle_logs')
+      .find({ user_id: userId })
+      .sort({ period_start: -1 })
+      .limit(4)
+      .toArray();
 
     if (logs.length >= 2) {
       // Calculate length of the last cycle
@@ -31,12 +33,12 @@ async function runTriage(userId) {
       }
     }
 
-    // 2. Check Daily Logs for repeated severe symptoms (e.g., severe cramps, severe headaches) in last 14 days
-    const dailyLogsRes = await db.query(
-      'SELECT * FROM daily_logs WHERE user_id = $1 ORDER BY date DESC LIMIT 14',
-      [userId]
-    );
-    const dailyLogs = dailyLogsRes.rows;
+    // 2. Check Daily Logs for repeated severe symptoms in last 14 days
+    const dailyLogs = await database.collection('daily_logs')
+      .find({ user_id: userId })
+      .sort({ date: -1 })
+      .limit(14)
+      .toArray();
 
     let severeCount = 0;
     const severeSymptoms = [];
@@ -70,41 +72,51 @@ async function runTriage(userId) {
       const message = `Health Triage Notice: We noticed a pattern in your logging (${reasons.join(' ')}). Please consider consulting with a healthcare provider for professional support. Bloom is a wellness companion and does not provide diagnoses.`;
 
       // Check if a triage warning has been sent in the last 7 days to avoid alert fatigue
-      const recentNotifRes = await db.query(
-        "SELECT id FROM notifications WHERE user_id = $1 AND type = 'triage_warning' AND scheduled_for > CURRENT_TIMESTAMP - INTERVAL '7 days'",
-        [userId]
-      );
-      
-      const sqliteRecentNotifRes = await db.query(
-        "SELECT id FROM notifications WHERE user_id = $1 AND type = 'triage_warning' AND datetime(scheduled_for) > datetime('now', '-7 days')",
-        [userId]
-      ).catch(() => null); // Fallback if postgres interval fails on SQLite or vice versa
+      const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-      const recentNotifs = (sqliteRecentNotifRes && sqliteRecentNotifRes.rows) || recentNotifRes.rows;
+      const recentNotifs = await database.collection('notifications')
+        .find({
+          user_id: userId,
+          type: 'triage_warning',
+          scheduled_for: { $gt: cutoff }
+        })
+        .limit(1)
+        .toArray();
 
       if (recentNotifs.length === 0) {
-        // Insert notification
         const scheduledTime = new Date().toISOString();
-        await db.query(
-          'INSERT INTO notifications (user_id, type, message, scheduled_for, sent_at) VALUES ($1, $2, $3, $4, $5)',
-          [userId, 'triage_warning', message, scheduledTime, scheduledTime]
-        );
-        
+        await database.collection('notifications').insertOne({
+          user_id: userId,
+          type: 'triage_warning',
+          message,
+          scheduled_for: scheduledTime,
+          sent_at: scheduledTime,
+          created_at: new Date()
+        });
+
         console.log(`Triage alert generated for user ID ${userId}`);
       }
 
       // Log triage execution audit details
       const actionSummary = `Triage flagged potential health irregularities: ${reasons.join(' ')}`;
-      await db.query(
-        'INSERT INTO agent_actions (user_id, agent_name, trigger_type, action_taken, reasoning_summary) VALUES ($1, $2, $3, $4, $5)',
-        [userId, 'Triage Agent', 'log_triage_check', 'Generated warning notification', actionSummary]
-      );
+      await database.collection('agent_actions').insertOne({
+        user_id: userId,
+        agent_name: 'Triage Agent',
+        trigger_type: 'log_triage_check',
+        action_taken: 'Generated warning notification',
+        reasoning_summary: actionSummary,
+        created_at: new Date()
+      });
     } else {
       // Log normal checks once in a while to keep trace
-      await db.query(
-        'INSERT INTO agent_actions (user_id, agent_name, trigger_type, action_taken, reasoning_summary) VALUES ($1, $2, $3, $4, $5)',
-        [userId, 'Triage Agent', 'log_triage_check', 'No action needed', 'Logs reviewed. All metrics inside standard parameters.']
-      );
+      await database.collection('agent_actions').insertOne({
+        user_id: userId,
+        agent_name: 'Triage Agent',
+        trigger_type: 'log_triage_check',
+        action_taken: 'No action needed',
+        reasoning_summary: 'Logs reviewed. All metrics inside standard parameters.',
+        created_at: new Date()
+      });
     }
 
     return { anomalyDetected, reasons };

@@ -10,7 +10,7 @@ const { generatePlan } = require('./planner');
 async function handleChat(userId, messageHistory) {
   try {
     // 1. Fetch current profile & predictions for context
-    const profileRes = await db.query('SELECT * FROM profiles WHERE user_id = $1', [userId]);
+    const profileRes = await db.query('SELECT * FROM profile WHERE user_id = $1', [userId]);
     const profile = profileRes.rows[0] || {};
     const predictionRes = await db.query('SELECT * FROM predictions WHERE user_id = $1 ORDER BY id DESC LIMIT 1', [userId]);
     const prediction = predictionRes.rows[0] || { predicted_phase: 'follicular' };

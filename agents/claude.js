@@ -88,7 +88,7 @@ function generateMockResponse(systemPrompt, messages, tools) {
   }
 
   // 4. Default Chat Agent or general helper QA response
-  let answer = 'Thank you for reaching out. Bloom Gemini is here to support your wellness journey. How can I help you today?';
+  let answer = 'Thank you for reaching out. Bloom is here to support your wellness journey. How can I help you today?';
   
   if (lastMessage.includes('cramp') || lastMessage.includes('pain')) {
     answer = 'For period cramps, applying a warm heating pad to your lower abdomen and drinking hot ginger or chamomile tea can provide relief. Gentle stretching or a warm bath is also helpful. If the pain is severe or persistent, please consult a healthcare professional.';
@@ -120,7 +120,7 @@ async function callClaude({ systemPrompt, messages, tools = [] }) {
   }
 
   try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json'

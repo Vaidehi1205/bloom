@@ -1,5 +1,6 @@
-const { getAuth, getFirestore, admin, initialized: firebaseInitialized } = require('../firebase');
+const { getAuth, initialized: firebaseInitialized } = require('../firebase');
 require('dotenv').config();
+
 
 async function authMiddleware(req, res, next) {
   const authHeader = req.headers['authorization'];
@@ -19,14 +20,6 @@ async function authMiddleware(req, res, next) {
 
     const firebaseAuth = getAuth();
     const decoded = await firebaseAuth.verifyIdToken(token);
-    const firestore = getFirestore();
-
-    await firestore.collection('users').doc(decoded.uid).set({
-      uid: decoded.uid,
-      email: decoded.email || '',
-      locale: decoded.locale || 'en',
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
 
     req.user = {
       id: decoded.uid,

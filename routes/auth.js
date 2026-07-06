@@ -1,7 +1,8 @@
 const express = require('express');
 const https = require('https');
 const router = express.Router();
-const { getFirestore, admin, initialized: firebaseInitialized } = require('../firebase');
+const { initialized: firebaseInitialized } = require('../firebase');
+
 require('dotenv').config();
 
 function callFirebaseAuth(endpoint, payload) {
@@ -54,23 +55,7 @@ function callFirebaseAuth(endpoint, payload) {
   });
 }
 
-async function ensureUserRecord(authResult, locale) {
-  const firestore = getFirestore();
-  const userRef = firestore.collection('users').doc(authResult.localId);
-  const userData = {
-    uid: authResult.localId,
-    email: authResult.email,
-    locale: locale || 'en',
-    createdAt: admin.firestore.FieldValue.serverTimestamp()
-  };
 
-  await userRef.set(userData, { merge: true });
-  return {
-    id: authResult.localId,
-    email: authResult.email,
-    locale: locale || 'en'
-  };
-}
 
 // SIGNUP
 router.post('/signup', async (req, res) => {
@@ -94,8 +79,11 @@ router.post('/signup', async (req, res) => {
       returnSecureToken: true
     });
 
-    const userLocale = locale || 'en';
-    const user = await ensureUserRecord(authResult, userLocale);
+    const user = {
+      id: authResult.localId,
+      email: authResult.email,
+      locale: locale || 'en'
+    };
 
     return res.status(201).json({
       token: authResult.idToken,
@@ -131,8 +119,11 @@ router.post('/login', async (req, res) => {
       returnSecureToken: true
     });
 
-    const userLocale = req.body.locale || 'en';
-    const user = await ensureUserRecord(authResult, userLocale);
+    const user = {
+      id: authResult.localId,
+      email: authResult.email,
+      locale: req.body.locale || 'en'
+    };
 
     return res.json({
       token: authResult.idToken,

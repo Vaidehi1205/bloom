@@ -13,7 +13,7 @@ async function generatePlan(userId, adjustmentReason = '') {
     if (userRes.rows.length === 0) throw new Error('User not found');
     const user = userRes.rows[0];
 
-    const profileRes = await db.query('SELECT * FROM profiles WHERE user_id = $1', [userId]);
+    const profileRes = await db.query('SELECT * FROM profile WHERE user_id = $1', [userId]);
     const profile = profileRes.rows[0] || {};
 
     const logsRes = await db.query('SELECT * FROM daily_logs WHERE user_id = $1 ORDER BY date DESC LIMIT 7', [userId]);

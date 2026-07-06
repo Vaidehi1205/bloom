@@ -117,116 +117,17 @@ function initializeFirebaseAdmin() {
 
 initializeFirebaseAdmin();
 
-async function verifyFirestoreConnectivity({ timeoutMs = 5000 } = {}) {
-  if (!initialized) {
-    return { ok: false, reason: 'Firebase Admin not initialized', error: initializationError };
-  }
-
-// Only attempt verification if Firestore access is possible.
-  try {
-    // Force creation of Firestore client via the same logic used at runtime.
-    const firestore = (typeof admin.firestore === 'function')
-      ? admin.firestore()
-      : (typeof admin.app === 'function' && admin.app()?.firestore ? admin.app().firestore() : getFirestore());
-
-    const projectId = process.env.FIREBASE_PROJECT_ID || admin?.options?.projectId;
-
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(`Firestore connectivity check timed out after ${timeoutMs}ms`)), timeoutMs);
-    });
-
-
-    // Read current timestamp from server (cheap) by doing a no-op write in a transaction? Firestore doesn't offer true no-op.
-    // Instead: list one collection is not supported without knowing its name.
-    // Best-effort: fetch the admin SDK's Firestore settings.
-    // We'll do a single call that forces gRPC to reach Firestore: admin.firestore() is already created,
-    // so we perform a small read on a deterministic, non-existent document with get() and handle NotFound.
-    // Firestore collection IDs cannot start with "__" (reserved internal namespace).
-    const docRef = firestore.collection('bloom_healthcheck').doc('connectivity');
-    const readPromise = docRef.get().then((snap) => {
-      // If doc doesn't exist, Firestore is still reachable.
-      return { ok: true, exists: snap.exists, projectId };
-    });
-
-    const result = await Promise.race([readPromise, timeoutPromise]);
-    return result;
-  } catch (error) {
-    return {
-      ok: false,
-      reason: 'Firestore connectivity failed',
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      error
-    };
-  }
-}
-
-// Optionally run a startup verification only when Firebase Admin is initialized.
-// This avoids noisy startup failures when credentials are intentionally not configured.
-// Enable with FIREBASE_VERIFY_CONNECTIVITY=true
-if (initialized && process.env.FIREBASE_VERIFY_CONNECTIVITY === 'true') {
-  verifyFirestoreConnectivity()
-    .then((r) => {
-      if (!r.ok) {
-        console.error('Firestore startup connectivity check failed:', {
-          reason: r.reason,
-          projectId: r.projectId || process.env.FIREBASE_PROJECT_ID,
-          message: r.error?.message,
-          code: r.error?.code
-        });
-      } else {
-        console.log('Firestore startup connectivity check OK:', {
-          exists: r.exists,
-          projectId: r.projectId || process.env.FIREBASE_PROJECT_ID
-        });
-      }
-    })
-    .catch((e) => {
-      console.error('Firestore startup connectivity check unexpected error:', e);
-    });
-} else if (process.env.FIREBASE_VERIFY_CONNECTIVITY === 'true' && initializationError) {
-  // Only warn when explicitly enabled.
-  console.warn('Firebase Admin not initialized; skipping Firestore connectivity check.');
-}
-
-
-
 const getAuth = () => {
   if (!initialized) {
-    throw initializationError || new Error('Firebase Admin is not initialized.');
+    const hint = process.env.GOOGLE_APPLICATION_CREDENTIALS
+      ? `GOOGLE_APPLICATION_CREDENTIALS is set to "${process.env.GOOGLE_APPLICATION_CREDENTIALS}" but Firebase still failed to initialize. Check the path and JSON validity.`
+      : 'Set FIREBASE_SERVICE_ACCOUNT (JSON string or file path) or GOOGLE_APPLICATION_CREDENTIALS (path to service account JSON).';
+    const err = initializationError || new Error('Firebase Admin is not initialized.');
+    // Throw a clearer error only when Auth is actually requested.
+    err.message = `${err.message}\n${hint}`;
+    throw err;
   }
   return admin.auth();
-};
-
-
-const getFirestore = () => {
-  if (!initialized) {
-    throw initializationError || new Error('Firebase Admin is not initialized.');
-  }
-
-  // firebase-admin differs by version/build. Prefer the official accessors that exist.
-  // 1) admin.firestore() (newer shapes)
-  if (typeof admin.firestore === 'function') {
-    return admin.firestore();
-  }
-
-  // 2) admin.app().firestore() (common)
-  if (typeof admin.app === 'function') {
-    const app = admin.app();
-    if (app && typeof app.firestore === 'function') {
-      return app.firestore();
-    }
-  }
-
-  // 3) admin.getApps()[0].firestore() (explicit)
-  const appsArr = Array.isArray(admin.getApps()) ? admin.getApps() : [];
-  if (appsArr.length && appsArr[0] && typeof appsArr[0].firestore === 'function') {
-    return appsArr[0].firestore();
-  }
-
-  const appsCount = Array.isArray(admin.getApps()) ? admin.getApps().length : 'unknown';
-  throw new Error(
-    `Firebase Admin does not expose Firestore helpers. Check firebase-admin version/install and credentials. Initialized=${initialized}, apps=${appsCount}`
-  );
 };
 
 module.exports = {
@@ -237,6 +138,8 @@ module.exports = {
     return initializationError;
   },
   getAuth,
-  getFirestore,
   admin
 };
+
+
+

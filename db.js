@@ -1,30 +1,13 @@
-const { getFirestore, admin } = require('./firebase');
+const { getDb } = require('./mongodb');
 
 /**
- * Firestore-backed minimal SQL-like adapter.
+ * MongoDB-backed minimal SQL-like adapter.
  *
- * The codebase currently calls db.query() with strings such as:
- *   SELECT * FROM predictions WHERE user_id = $1 ORDER BY id DESC LIMIT 1
- *   UPDATE users SET locale = $1 WHERE id = $2
- *   INSERT INTO daily_logs (...columns...) VALUES ($1,$2,...)
- *
- * This module implements just enough to support those query patterns.
+ * The codebase currently calls db.query() with SQL-like strings (a subset) and
+ * positional parameters ($1, $2, ...). This adapter translates only the
+ * query patterns used by Bloom routes into real MongoDB queries.
  */
 
-const firestore = (() => {
-  try {
-    return getFirestore();
-  } catch (e) {
-    return null;
-  }
-})();
-
-function ensureFirestore() {
-  if (!firestore) {
-    throw new Error('Firestore is not available. Check Firebase Admin initialization credentials.');
-  }
-  return firestore;
-}
 
 function parseJSONMaybe(val) {
   if (val == null) return null;
@@ -85,63 +68,56 @@ function extractDeleteTableWhere(sql) {
 }
 
 async function selectRows({ table, userId, limit, orderBy }) {
-  const db = ensureFirestore();
-  const col = db.collection(table);
+  const database = await getDb();
+  const col = database.collection(table);
 
-  let query = col.where('user_id', '==', userId);
-  // App uses different “order by” fields.
+  const filter = { user_id: userId };
+  const sort = {};
   if (orderBy?.field) {
-    query = query.orderBy(orderBy.field, orderBy.dir);
-  }
-  if (limit != null) {
-    query = query.limit(limit);
+    sort[orderBy.field] = orderBy.dir === 'desc' ? -1 : 1;
   }
 
-  const snap = await query.get();
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  let cursor = col.find(filter);
+  if (Object.keys(sort).length) cursor = cursor.sort(sort);
+  if (limit != null) cursor = cursor.limit(limit);
+
+  const docs = await cursor.toArray();
+  return docs.map((d) => ({ id: d._id?.toString?.() ?? d._id, ...d }));
 }
+
 
 async function deleteRows({ table, id, userId }) {
-  const db = ensureFirestore();
-  const col = db.collection(table);
-  // Using compound constraints would require indexing; easiest is query then delete.
-  let q = col.where('id', '==', id);
-  if (userId != null) q = q.where('user_id', '==', userId);
-  const snap = await q.get();
+  const database = await getDb();
+  const col = database.collection(table);
 
-  const deletes = snap.docs.map((doc) => doc.ref.delete());
-  await Promise.all(deletes);
-  return { affectedRows: snap.size };
+  const filter = { id };
+  if (userId != null) filter.user_id = userId;
+
+  const res = await col.deleteMany(filter);
+  return { affectedRows: res.deletedCount ?? 0 };
 }
+
 
 async function updateRowsUsersLocale({ locale, userId }) {
-  const db = ensureFirestore();
-  const col = db.collection('users');
-  // App uses UPDATE users SET locale = $1 WHERE id = $2
-  // We store users as docs in /users with field id (or use doc id).
+  const database = await getDb();
+  const col = database.collection('users');
 
-  // Prefer deterministic doc lookup if possible.
-  const maybeDoc = await col.doc(String(userId)).get().catch(() => null);
-  if (maybeDoc?.exists) {
-    await col.doc(String(userId)).set({ locale }, { merge: true });
-    return;
-  }
+  // Update by numeric/string id field.
+  const res = await col.updateMany({ id: userId }, { $set: { locale } });
+  if ((res.modifiedCount ?? 0) > 0) return;
 
-  // Fallback: query by id field.
-  const snap = await col.where('id', '==', userId).get();
-  const updates = snap.docs.map((d) => d.ref.set({ locale }, { merge: true }));
-  await Promise.all(updates);
+  // Fallback: also try if caller stores users by _id.
+  await col.updateMany({ _id: String(userId) }, { $set: { locale } }).catch(() => null);
 }
 
+
 async function insertDailyLog(params) {
-  const db = ensureFirestore();
-  const col = db.collection('daily_logs');
+  const database = await getDb();
+  const col = database.collection('daily_logs');
 
   const [userId, date, waterIntakeMl, completed, sleepHours, mood, symptomsStr] = params;
 
-  // Create auto doc id
-  const docRef = col.doc();
-  await docRef.set({
+  await col.insertOne({
     user_id: userId,
     date,
     water_intake_ml: waterIntakeMl,
@@ -153,28 +129,26 @@ async function insertDailyLog(params) {
 }
 
 async function upsertDailyLog(params) {
-  const db = ensureFirestore();
+  const database = await getDb();
+  const col = database.collection('daily_logs');
   const [userId, date, waterIntakeMl, completed, sleepHours, mood, symptomsStr] = params;
 
-  const col = db.collection('daily_logs');
-  const snap = await col.where('user_id', '==', userId).where('date', '==', date).limit(1).get();
+  const filter = { user_id: userId, date };
+  const update = {
+    $set: {
+      water_intake_ml: waterIntakeMl,
+      exercise_completed: completed,
+      sleep_hours: sleepHours,
+      mood,
+      symptoms: symptomsStr
+    }
+  };
 
-  if (snap.empty) {
-    await insertDailyLog(params);
-    return { inserted: true };
-  }
-
-  const doc = snap.docs[0];
-  await doc.ref.set({
-    water_intake_ml: waterIntakeMl,
-    exercise_completed: completed,
-    sleep_hours: sleepHours,
-    mood,
-    symptoms: symptomsStr
-  }, { merge: true });
-
-  return { inserted: false };
+  const res = await col.updateOne(filter, update, { upsert: true });
+  const inserted = (res.upsertedCount ?? 0) > 0;
+  return { inserted };
 }
+
 
 async function query(sql, params = []) {
   const sqlTrim = String(sql).trim();
@@ -195,14 +169,27 @@ async function query(sql, params = []) {
       return { rows };
     }
 
-    // Locale query: SELECT locale FROM users WHERE id = $1
-    const whereIdParamIdx = extractWhereIdEqParam(sqlTrim);
-    if (whereIdParamIdx != null && table === 'users') {
-      const idVal = params[whereIdParamIdx];
-      const db = ensureFirestore();
-      const snap = await db.collection('users').where('id', '==', idVal).limit(1).get();
-      const rows = snap.docs.map((d) => d.data()).map((d) => ({ locale: d.locale })) ;
-      return { rows };
+    // SELECT id FROM users (used by predictor warmup)
+    if (table === 'users') {
+      // Only handle the exact minimal projection we need.
+      if (/select\s+id\s+from\s+users\b/i.test(sqlTrim)) {
+        const database = await getDb();
+        const users = database.collection('users');
+        const docs = await users.find({}, { projection: { id: 1 } }).toArray();
+        return {
+          rows: docs.map((d) => ({ id: d.id ?? d._id?.toString?.() ?? d._id }))
+        };
+      }
+
+      // Locale query: SELECT locale FROM users WHERE id = $1
+      const whereIdParamIdx = extractWhereIdEqParam(sqlTrim);
+      if (whereIdParamIdx != null && table === 'users') {
+        const idVal = params[whereIdParamIdx];
+        const database = await getDb();
+        const users = database.collection('users');
+        const doc = await users.findOne({ id: idVal }, { projection: { locale: 1 } });
+        return { rows: doc ? [{ locale: doc.locale }] : [] };
+      }
     }
 
     // Default fallback
@@ -260,8 +247,12 @@ async function query(sql, params = []) {
 }
 
 module.exports = {
-  dbType: 'firestore',
+  dbType: 'mongodb',
   initDb: async () => true,
-  query
+  query,
 };
+
+
+
+
 

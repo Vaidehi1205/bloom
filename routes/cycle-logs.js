@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../db');
+const { getDb } = require('../mongodb');
 const authMiddleware = require('../middleware/auth');
 const { predictCycle } = require('../agents/predictor');
 const { runTriage } = require('../agents/triage');
@@ -10,11 +10,17 @@ router.get('/', authMiddleware, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const logsRes = await db.query(
-      'SELECT * FROM cycle_logs WHERE user_id = $1 ORDER BY period_start DESC',
-      [userId]
-    );
-    res.json(logsRes.rows);
+    const database = await getDb();
+    const col = database.collection('cycle_logs');
+
+    const logs = await col
+      .find({ user_id: userId })
+      .sort({ period_start: -1 })
+      .toArray();
+
+    res.json(logs.map((d) => ({ id: d._id?.toString?.() ?? d._id, ...d })));
+
+
   } catch (error) {
     console.error('Fetch cycle logs error:', error);
     res.status(500).json({ error: 'Internal server error fetching cycle logs.' });
@@ -32,10 +38,16 @@ router.post('/', authMiddleware, async (req, res) => {
 
   try {
     // Insert the log
-      await db.query(
-        'INSERT INTO cycle_logs (user_id, period_start, period_end, flow_intensity, notes) VALUES ($1, $2, $3, $4, $5)',
-        [userId, period_start, period_end, flow_intensity, notes || '']
-      );
+    const database = await getDb();
+    const col = database.collection('cycle_logs');
+
+    await col.insertOne({
+      user_id: userId,
+      period_start,
+      period_end,
+      flow_intensity,
+      notes: notes || ''
+    });
 
     // Proactively run predictor to update the phase for the dashboard immediately
     let predictionResult = null;

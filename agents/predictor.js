@@ -1,4 +1,4 @@
-const db = require('../db');
+const { getDb } = require('../mongodb');
 
 /**
  * Predicts the user's cycle phase and next period date.
@@ -8,11 +8,12 @@ const db = require('../db');
 async function predictCycle(userId) {
   try {
     // 1. Fetch cycle logs
-    const logsRes = await db.query(
-      'SELECT * FROM cycle_logs WHERE user_id = $1 ORDER BY period_start DESC',
-      [userId]
-    );
-    const logs = logsRes.rows;
+    const database = await getDb();
+    const logsCol = database.collection('cycle_logs');
+    const logs = await logsCol
+      .find({ user_id: userId })
+      .sort({ period_start: -1 })
+      .toArray();
 
     let averageCycleLength = 28; // Default cycle length
     let averagePeriodDuration = 5; // Default period duration
@@ -98,19 +99,25 @@ async function predictCycle(userId) {
 
     const predictedNextPeriodStr = predictedNextPeriodDate.toISOString().split('T')[0];
 
-    // 3. Write predictions to table (overwrite existing user prediction)
-    await db.query('DELETE FROM predictions WHERE user_id = $1', [userId]);
-    await db.query(
-      'INSERT INTO predictions (user_id, predicted_next_period, predicted_phase, confidence) VALUES ($1, $2, $3, $4)',
-      [userId, predictedNextPeriodStr, currentPhase, confidence]
-    );
+    // 3. Write predictions (overwrite existing user prediction)
+    await database.collection('predictions').deleteMany({ user_id: userId });
+    await database.collection('predictions').insertOne({
+      user_id: userId,
+      predicted_next_period: predictedNextPeriodStr,
+      predicted_phase: currentPhase,
+      confidence
+    });
 
     // 4. Log to agent actions
     const summary = `Predictor Agent completed nightly analysis. Predicted next period date: ${predictedNextPeriodStr}, current phase: ${currentPhase}, confidence: ${(confidence * 100).toFixed(0)}%.`;
-    await db.query(
-      'INSERT INTO agent_actions (user_id, agent_name, trigger_type, action_taken, reasoning_summary) VALUES ($1, $2, $3, $4, $5)',
-      [userId, 'Predictor Agent', 'nightly_cron', 'Cycle tracking prediction updated', summary]
-    );
+    await database.collection('agent_actions').insertOne({
+      user_id: userId,
+      agent_name: 'Predictor Agent',
+      trigger_type: 'nightly_cron',
+      action_taken: 'Cycle tracking prediction updated',
+      reasoning_summary: summary,
+      created_at: new Date()
+    });
 
     return {
       predicted_next_period: predictedNextPeriodStr,
@@ -128,8 +135,8 @@ async function predictCycle(userId) {
  */
 async function predictAllUsers() {
   try {
-    const usersRes = await db.query('SELECT id FROM users');
-    const users = usersRes.rows;
+    const database = await getDb();
+    const users = await database.collection('users').find({}, { projection: { id: 1 } }).toArray();
     console.log(`Predictor running for ${users.length} users...`);
     for (const u of users) {
       await predictCycle(u.id);
